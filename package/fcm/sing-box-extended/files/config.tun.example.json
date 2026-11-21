@@ -21,6 +21,13 @@
         "action": "route",
         "source_ip_is_private": true,
         "server": "direct-dns"
+      },
+      {
+        "action": "route",
+        "rule_set": [
+          "geosite-cn"
+        ],
+        "server": "direct-dns"
       }
     ],
     "final": "proxy-dns"
@@ -72,6 +79,20 @@
     }
   ],
   "route": {
+    "rule_set": [
+      {
+        "type": "local",
+        "tag": "geoip-cn",
+        "format": "binary",
+        "path": "/usr/share/sing-box/geo/geoip-cn.srs"
+      },
+      {
+        "type": "local",
+        "tag": "geosite-cn",
+        "format": "binary",
+        "path": "/usr/share/sing-box/geo/geosite-cn.srs"
+      }
+    ],
     "rules": [
       {
         "action": "hijack-dns",
@@ -89,6 +110,20 @@
         "outbound": "direct",
         "source_ip_cidr": [
           "172.19.0.0/30"
+        ]
+      },
+      {
+        "action": "route",
+        "outbound": "direct",
+        "rule_set": [
+          "geosite-cn"
+        ]
+      },
+      {
+        "action": "route",
+        "outbound": "direct",
+        "rule_set": [
+          "geoip-cn"
         ]
       }
     ],
