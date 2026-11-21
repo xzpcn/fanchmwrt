@@ -111,6 +111,7 @@ jobs:
           done
           cat >> .config <<EOF
           CONFIG_CCACHE=y
+          CONFIG_BUILD_LOG=y
           CONFIG_GOLANG_BUILD_CACHE_DIR="$HOME/.cache/openwrt-go-build"
           EOF
           make defconfig
@@ -127,8 +128,32 @@ jobs:
       - name: 编译失败时输出日志
         if: failure()
         run: |
-          find logs build_dir -maxdepth 3 -name '*.log*' -type f 2>/dev/null | head -n 30 | \
-            xargs -r -I{} sh -c 'echo "===== {} ====="; tail -n 60 "{}"'
+          # 并行构建时控制台只剩一行 ERROR，真正的报错在 logs/ 下的按包日志里
+          # （文件名由 include/subdir.mk 决定，这里用 find 匹配，不猜命名）。
+          [ -d logs ] || { echo "::error::没有 logs/ 目录，CONFIG_BUILD_LOG 没生效"; exit 1; }
+          find logs -type f -name '*sing-box-extended*' | sort | while read -r f; do
+            echo "===== $f ====="
+            tail -n 200 "$f"
+          done
+          # 再单独重跑一次这个包：-j1 V=s 不写日志文件，报错直接进控制台，
+          # 上面两段哪段都不全时以这一段为准。clean 是为了让 Build/Prepare
+          # （npm 编译管理面板那段）重新执行一遍，否则它会命中 stamp 被跳过。
+          echo "===== make -j1 V=s package/fcm/sing-box-extended/{clean,compile} ====="
+          make -j1 V=s package/fcm/sing-box-extended/{clean,compile} 2>&1 | tail -n 400 || true
+
+      - name: 检查固件里的内核与分流规则
+        run: |
+          ipk="$(find bin/targets/ramips/mt7621 -maxdepth 1 -type f -name 'sing-box-extended_*.ipk' -print)"
+          case "$ipk" in
+            *$'\n'*) echo "::error::找到多个 ipk，无法判断：$ipk"; exit 1 ;;
+            "")      echo "::error::没找到 sing-box-extended 的 ipk"; exit 1 ;;
+          esac
+          du -h "$ipk"
+          tar -xzOf "$ipk" data.tar.gz > "$RUNNER_TEMP/fcm-data.tar.gz"
+          echo "===== 包内文件 ====="
+          tar -tzvf "$RUNNER_TEMP/fcm-data.tar.gz" |
+            grep -E 'usr/bin/sing-box$|usr/share/sing-box/geo/|etc/sing-box/' || {
+              echo "::error::包里没有 sing-box 主程序或 /usr/share/sing-box/geo 规则文件"; exit 1; }
 
       - name: 整理产物
         run: |
