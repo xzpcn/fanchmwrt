@@ -1,0 +1,152 @@
+name: Build FanchmWrt + sing-box-extended (Mi Router 3 Pro)
+
+# 在本仓库（fanchmwrt 的 fork）里手动触发，产出已内置 sing-box-extended 的
+# Xiaomi Mi Router 3 Pro 固件。构建方式：OpenWrt 的 lang/golang 交叉编译源码，
+# 并用 vite 生成内置管理面板的前端资源。
+
+on:
+  workflow_dispatch:
+    inputs:
+      extra_packages:
+        description: "额外打包进固件的包名，空格分隔（可留空）"
+        required: false
+        type: string
+        default: ""
+
+concurrency:
+  group: build-r3p-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: 释放磁盘空间
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo docker image prune --all --force >/dev/null 2>&1 || true
+          df -h "$GITHUB_WORKSPACE"
+
+      - name: 安装编译依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -yy --no-install-recommends \
+            build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
+            gettext git libncurses-dev libssl-dev python3 python3-setuptools \
+            rsync swig unzip zlib1g-dev file wget
+          sudo apt-get clean
+
+      - name: 安装 Node.js（用于管理面板前端）
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: 恢复缓存
+        uses: actions/cache@v4
+        with:
+          path: |
+            dl
+            ~/.ccache
+            ~/.npm
+            ~/.cache/openwrt-go-build
+          key: r3p-${{ runner.os }}-${{ hashFiles('version', 'feeds.conf.default', 'package/fcm/sing-box-extended/Makefile', '.github/config/fanchmwrt-r3p.config') }}
+          restore-keys: |
+            r3p-${{ runner.os }}-
+
+      - name: 更新并安装 feeds
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          test -f feeds/packages/lang/golang/golang-package.mk || {
+            echo "packages feed 不完整，缺少 golang-package.mk" >&2; exit 1; }
+
+      - name: 检查 feed 里的 Go 版本
+        run: |
+          need=1.26.4   # sing-box-extended go.mod 里的 go 指令
+          cd feeds/packages/lang/golang
+          def="$(sed -n 's/^GO_DEFAULT_VERSION:=\([0-9.]*\)/\1/p' golang-values.mk 2>/dev/null | head -n1)"
+          list=""
+          for mk in $(printf '%s\n' golang*/Makefile golang-*/Makefile | sort -u); do
+            [ -f "$mk" ] || continue
+            mm="$(sed -n 's/^GO_VERSION_MAJOR_MINOR:=\([0-9.]*\)/\1/p' "$mk" | head -n1)"
+            pp="$(sed -n 's/^GO_VERSION_PATCH:=\([0-9]*\)/\1/p' "$mk" | head -n1)"
+            if [ -n "$mm" ]; then
+              list="$list ${mm}.${pp:-0}"
+            else
+              list="$list $(sed -n 's/^PKG_VERSION:=\([0-9.]*\).*/\1/p' "$mk" | head -n1)"
+            fi
+          done
+          echo "feed 里的 Go:$list（默认主线 ${def:-未声明}）"
+          ver="$(printf '%s\n' $list | sort -V | tail -n1)"
+          dver="$(printf '%s\n' $list | grep "^${def}\." | sort -V | tail -n1)"
+          [ -n "$dver" ] && ver="$dver"
+          if [ -z "$ver" ]; then
+            echo "认不出 feed 的 Go 版本，跳过检查。"
+            exit 0
+          fi
+          echo "本次将使用的 Go: $ver"
+          if [ "$(printf '%s\n%s\n' "$ver" "$need" | sort -V | head -n1)" != "$need" ]; then
+            echo "Go $ver 低于 $need，请把 feeds.conf.default 里的 packages 指向更新的 commit。" >&2
+            exit 1
+          fi
+
+      - name: 生成 .config
+        env:
+          EXTRA_PACKAGES: ${{ inputs.extra_packages }}
+        run: |
+          cp .github/config/fanchmwrt-r3p.config .config
+          for pkg in $EXTRA_PACKAGES; do
+            echo "CONFIG_PACKAGE_$pkg=y" >> .config
+          done
+          cat >> .config <<EOF
+          CONFIG_CCACHE=y
+          CONFIG_GOLANG_BUILD_CACHE_DIR="$HOME/.cache/openwrt-go-build"
+          EOF
+          make defconfig
+          grep -q '^CONFIG_PACKAGE_sing-box-extended=y$' .config || {
+            echo "sing-box-extended 未被选中，检查 .github/config/fanchmwrt-r3p.config" >&2; exit 1; }
+          grep -E '^CONFIG_TARGET_.*DEVICE|^CONFIG_PACKAGE_sing-box-extended|^CONFIG_SING_BOX_EXTENDED' .config
+
+      - name: 下载源码包
+        run: make -j"$(nproc)" download
+
+      - name: 编译固件
+        run: make -j"$(nproc)"
+
+      - name: 编译失败时输出日志
+        if: failure()
+        run: |
+          find logs build_dir -maxdepth 3 -name '*.log*' -type f 2>/dev/null | head -n 30 | \
+            xargs -r -I{} sh -c 'echo "===== {} ====="; tail -n 60 "{}"'
+
+      - name: 整理产物
+        run: |
+          mkdir -p out
+          find bin/targets/ramips/mt7621 -maxdepth 1 -type f \
+            \( -name '*.bin' -o -name '*.itb' -o -name '*.manifest' -o -name '*.json' \) \
+            -exec cp -t out/ {} +
+          find bin -type f \
+            \( -name 'sing-box-extended*.ipk' -o -name 'sing-box-extended*.apk' \) \
+            -exec cp -t out/ {} + 2>/dev/null || true
+          cp .config out/fanchmwrt-r3p.config.used
+          ( cd out && sha256sum * | grep -v sha256sums.txt > sha256sums.txt || true )
+          ls -lh out
+
+      - name: 上传固件
+        uses: actions/upload-artifact@v4
+        with:
+          name: fanchmwrt-r3p-sing-box-extended-${{ github.sha }}
+          path: out/*
+          if-no-files-found: error
+          retention-days: 30

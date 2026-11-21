@@ -1,0 +1,192 @@
+name: Sync fanchmwrt upstream (每日 04:00)
+
+# 每天检查上游 fanchmwrt/fanchmwrt 有没有新提交，有就调用 GitHub 的
+# merge-upstream 接口更新 fork（等价于网页上的 “Sync fork / Update branch”）。
+# 全程只打 REST API，不 clone 这个 267MB 的仓库，几十秒就能跑完；
+# 我们自己加的 package/fcm/sing-box-extended 和 .github 文件不会被覆盖。
+#
+# 顺带检查 shtorm-7/sing-box-extended 有无新 release，有就开一个改好
+# PKG_VERSION / PKG_HASH 的 PR，由人确认后再合并。
+#
+# 注意
+#   * Actions 的 cron 只认 UTC：0 20 * * * = 北京时间 04:00；想要 UTC 04:00
+#     就写 "0 4 * * *"。计划任务被推迟十几到几十分钟是常态。
+#   * 本文件必须在 fork 的默认分支上，schedule 才会触发。
+#   * 建议配一个 PAT 名叫 BUILD_TOKEN（fine-grained：Contents=Write、
+#     Pull requests=Write、Actions=Write）。没配则用 GITHUB_TOKEN，功能一样，
+#     只是提交作者是 github-actions[bot]，而且不会联动触发固件构建。
+
+on:
+  schedule:
+    - cron: '0 20 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "只检查、只写报告，不做任何改动"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+env:
+  TZ: Asia/Shanghai
+  UPSTREAM: fanchmwrt/fanchmwrt
+  EXT_REPO: shtorm-7/sing-box-extended
+  PKG_MAKEFILE: package/fcm/sing-box-extended/Makefile
+  BUILD_WORKFLOW: build-fanchmwrt-r3p-singbox.yml
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: 记录检查的分支
+        id: ctx
+        env:
+          GH_TOKEN: ${{ secrets.BUILD_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          echo "branch=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+          echo "## $GITHUB_REPOSITORY @ $GITHUB_REF_NAME" >> "$GITHUB_STEP_SUMMARY"
+          if ! gh api "repos/$UPSTREAM/commits/$GITHUB_REF_NAME" --jq .sha >/dev/null 2>&1; then
+            echo "::error::上游 $UPSTREAM 没有同名分支 $GITHUB_REF_NAME，请把本文件放到与上游一致的分支上。"
+            exit 1
+          fi
+
+      - name: 与上游比较
+        id: cmp
+        env:
+          GH_TOKEN: ${{ secrets.BUILD_TOKEN || secrets.GITHUB_TOKEN }}
+          BRANCH: ${{ steps.ctx.outputs.branch }}
+        run: |
+          fork_sha="$(gh api "repos/$GITHUB_REPOSITORY/commits/$BRANCH" --jq .sha)"
+          up_sha="$(gh api "repos/$UPSTREAM/commits/$BRANCH" --jq .sha)"
+          echo "fork_sha=$fork_sha" >> "$GITHUB_OUTPUT"
+          # compare/本地...上游 的 ahead_by = 上游有、本地还没有的提交数
+          diff_json="$(gh api "repos/$GITHUB_REPOSITORY/compare/$fork_sha...$up_sha")"
+          behind="$(jq -r .ahead_by <<<"$diff_json")"
+          echo "behind=$behind" >> "$GITHUB_OUTPUT"
+          echo "上游 ${up_sha:0:9}，本地 ${fork_sha:0:9}：**落后 $behind 个提交**" >> "$GITHUB_STEP_SUMMARY"
+          [ "$behind" != "0" ] || exit 0
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### 待拉取的上游提交" >> "$GITHUB_STEP_SUMMARY"
+          jq -r '.commits[:60][] | "- `" + (.sha[0:9]) + "` " + (.commit.message | split("\n")[0])' \
+            <<<"$diff_json" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### 其中影响构建的文件" >> "$GITHUB_STEP_SUMMARY"
+          jq -r '[(.files // [])[] | .filename
+                 | select(test("^(version|feeds\\.conf\\.default|include/target.mk|target/linux/ramips/)"))]
+                 | if length == 0 then "（无）" else .[:30][] | "- " + . end' \
+            <<<"$diff_json" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 同步 fork
+        if: steps.cmp.outputs.behind != '0'
+        env:
+          GH_TOKEN: ${{ secrets.BUILD_TOKEN || secrets.GITHUB_TOKEN }}
+          BRANCH: ${{ steps.ctx.outputs.branch }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "dry run：跳过同步。" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if ! out="$(gh api -X POST "repos/$GITHUB_REPOSITORY/merge-upstream" \
+                       -f branch="$BRANCH" 2>&1)"; then
+            if grep -q 'HTTP 409' <<<"$out"; then
+              echo "::error::上游改动与本地提交冲突，merge-upstream 无法自动合并。"
+              {
+                echo ""
+                echo "## 需要你手动处理"
+                echo "上游改了和本仓库重叠的文件，请在本地 \`git merge\` 上游分支解决冲突后 push。"
+                echo "对比页：<https://github.com/$GITHUB_REPOSITORY/compare/$BRANCH>"
+              } >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "::error::merge-upstream 失败：$out"
+            fi
+            exit 1
+          fi
+          msg="$(jq -r '"已同步：merge_type=" + (.merge_type // "?") + "，base_branch=" + (.base_branch // "?")' \
+                   <<<"$out" 2>/dev/null || true)"
+          printf '%s\n' "${msg:-已同步：$out}" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: 检查 sing-box-extended 新版本
+        env:
+          GH_TOKEN: ${{ secrets.BUILD_TOKEN || secrets.GITHUB_TOKEN }}
+          BRANCH: ${{ steps.ctx.outputs.branch }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          tag="$(gh api "repos/$EXT_REPO/releases/latest" --jq .tag_name 2>/dev/null || true)"
+          [ -n "$tag" ] || { echo "读不到 $EXT_REPO 的 release，跳过。" >> "$GITHUB_STEP_SUMMARY"; exit 0; }
+          latest="${tag#v}"
+          mk="$(gh api "repos/$GITHUB_REPOSITORY/contents/$PKG_MAKEFILE?ref=$BRANCH" 2>/dev/null || true)"
+          [ -n "$mk" ] || {
+            echo "::warning::$PKG_MAKEFILE 不在 $BRANCH 上，集成文件还没提交？跳过版本检查。"
+            exit 0
+          }
+          cur="$(jq -r .content <<<"$mk" | base64 -d | sed -n 's/^PKG_VERSION:=\(.*\)$/\1/p')"
+          blob_sha="$(jq -r .sha <<<"$mk")"
+          echo "本仓库 \`PKG_VERSION=$cur\`，扩展分支最新 release \`$latest\`" >> "$GITHUB_STEP_SUMMARY"
+          if [ -z "$cur" ] || [ "$cur" = "$latest" ]; then exit 0; fi
+          if [ "$(printf '%s\n%s\n' "$cur" "$latest" | sort -V | tail -n1)" = "$cur" ]; then
+            echo "本地版本更新，跳过。" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          nb="bump/sing-box-extended-$latest"
+          if [ "$(gh api "repos/$GITHUB_REPOSITORY/pulls?state=open&per_page=100" \
+                   --jq "[.[] | select(.head.ref == \"$nb\")] | length")" != "0" ]; then
+            echo "已有 \`$nb\` 的待合并 PR，跳过。" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          newhash="$(curl -sSfL "https://codeload.github.com/$EXT_REPO/tar.gz/refs/tags/$tag" |
+                       sha256sum | cut -d' ' -f1)" ||
+            { echo "::error::下载 $tag 源码包失败，算不出 PKG_HASH"; exit 1; }
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "dry run：发现新版本 $latest（当前 $cur），不建 PR。" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          head_sha="$(gh api "repos/$GITHUB_REPOSITORY/commits/$BRANCH" --jq .sha)"
+          gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" \
+            -f ref="refs/heads/$nb" -f sha="$head_sha" >/dev/null 2>&1 ||
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/heads/$nb" \
+              -f sha="$head_sha" -F force=true >/dev/null
+          content="$(jq -r .content <<<"$mk" | base64 -d |
+                     sed -e "s|^PKG_VERSION:=.*|PKG_VERSION:=$latest|" \
+                         -e "s|^PKG_HASH:=.*|PKG_HASH:=$newhash|" \
+                         -e "s|^PKG_RELEASE:=.*|PKG_RELEASE:=1|" |
+                     base64 -w0)"
+          gh api -X PUT "repos/$GITHUB_REPOSITORY/contents/$PKG_MAKEFILE" \
+            -f branch="$nb" \
+            -f message="sing-box-extended: bump to $latest" \
+            -f content="$content" \
+            -f sha="$blob_sha" >/dev/null
+          body="$(printf '%s\n\n%s\n' "自动检查发现 \`$EXT_REPO\` 发布了 \`$tag\`（本仓库原为 \`$cur\`）。" "已改 \`PKG_VERSION\`、\`PKG_HASH\`（\`$tag\` 源码包 sha256）与 \`PKG_RELEASE:=1\`。合并前请扫一眼 release notes 里的 build tag 增减；若构建报 hash 不符，把 \`PKG_HASH\` 临时改成 \`skip\` 跑一次取回真实值。")"
+          url="$(gh api -X POST "repos/$GITHUB_REPOSITORY/pulls" \
+                   -f title="sing-box-extended: bump to $latest" \
+                   -f head="$nb" -f base="$BRANCH" \
+                   -f body="$body" --jq .html_url)"
+          echo "已开版本升级 PR：$url" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: 同步后触发固件构建
+        if: steps.cmp.outputs.behind != '0' && inputs.dry_run != true
+        env:
+          BRANCH: ${{ steps.ctx.outputs.branch }}
+          TOKEN: ${{ secrets.BUILD_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "未配置 BUILD_TOKEN，跳过自动构建（GITHUB_TOKEN 产生的事件不会联动新 workflow）。" \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if ! gh workflow run "$BUILD_WORKFLOW" --ref "$BRANCH" --token "$TOKEN" 2>&1 |
+               tee -a "$GITHUB_STEP_SUMMARY"; then
+            echo "::error::触发 $BUILD_WORKFLOW 失败，检查 BUILD_TOKEN 是否有 Actions: Write 权限。"
+            exit 1
+          fi
+          echo "已触发 \`$BUILD_WORKFLOW\`。" >> "$GITHUB_STEP_SUMMARY"
