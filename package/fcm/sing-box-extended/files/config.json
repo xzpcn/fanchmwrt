@@ -1,0 +1,72 @@
+{
+  "log": {
+    "level": "info",
+    "timestamp": true
+  },
+  "dns": {
+    "servers": [
+      {
+        "type": "local",
+        "tag": "system"
+      }
+    ]
+  },
+  "inbounds": [
+    {
+      "type": "mixed",
+      "tag": "local-proxy",
+      "listen": "127.0.0.1",
+      "listen_port": 20171
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "direct"
+    }
+  ],
+  "route": {
+    "rules": [
+      {
+        "action": "hijack-dns",
+        "port": 53
+      }
+    ],
+    "final": "direct"
+  },
+  "experimental": {
+    "cache_file": {
+      "enabled": true,
+      "path": "cache.db"
+    }
+  },
+  "services": [
+    {
+      "type": "manager",
+      "tag": "manager",
+      "inbounds": [
+        "local-proxy"
+      ],
+      "database": {
+        "driver": "sqlite",
+        "dsn": "manager.db"
+      }
+    },
+    {
+      "type": "manager-api",
+      "tag": "manager-api",
+      "api_type": "server",
+      "protocol_type": "http",
+      "listen": "::",
+      "listen_port": 9090,
+      "manager": "manager",
+      "api_key": "change-me-to-a-long-random-string"
+    },
+    {
+      "type": "admin-panel",
+      "tag": "admin-panel",
+      "listen": "::",
+      "listen_port": 9091
+    }
+  ]
+}

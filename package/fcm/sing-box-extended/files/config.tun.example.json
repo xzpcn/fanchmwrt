@@ -1,0 +1,133 @@
+{
+  "log": {
+    "level": "info",
+    "timestamp": true
+  },
+  "dns": {
+    "servers": [
+      {
+        "type": "local",
+        "tag": "direct-dns"
+      },
+      {
+        "type": "https",
+        "tag": "proxy-dns",
+        "server": "dns.google",
+        "detour": "proxy"
+      }
+    ],
+    "rules": [
+      {
+        "action": "route",
+        "source_ip_is_private": true,
+        "server": "direct-dns"
+      }
+    ],
+    "final": "proxy-dns"
+  },
+  "inbounds": [
+    {
+      "type": "tun",
+      "tag": "tun-in",
+      "interface_name": "tun0",
+      "address": [
+        "172.19.0.1/30"
+      ],
+      "stack": "gvisor",
+      "auto_route": true,
+      "strict_route": false,
+      "dns_mode": "hijack"
+    },
+    {
+      "type": "mixed",
+      "tag": "local-proxy",
+      "listen": "127.0.0.1",
+      "listen_port": 20171
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "vless",
+      "tag": "proxy",
+      "server": "192.0.2.1",
+      "server_port": 443,
+      "uuid": "00000000-0000-0000-0000-000000000000",
+      "flow": "xtls-rprx-vision",
+      "tls": {
+        "enabled": true,
+        "server_name": "example.com",
+        "utls": {
+          "enabled": true,
+          "fingerprint": "chrome"
+        }
+      }
+    },
+    {
+      "type": "direct",
+      "tag": "direct"
+    },
+    {
+      "type": "block",
+      "tag": "block"
+    }
+  ],
+  "route": {
+    "rules": [
+      {
+        "action": "hijack-dns",
+        "protocol": [
+          "dns"
+        ]
+      },
+      {
+        "action": "route",
+        "outbound": "direct",
+        "ip_is_private": true
+      },
+      {
+        "action": "route",
+        "outbound": "direct",
+        "source_ip_cidr": [
+          "172.19.0.0/30"
+        ]
+      }
+    ],
+    "final": "proxy"
+  },
+  "experimental": {
+    "cache_file": {
+      "enabled": true,
+      "path": "cache.db"
+    }
+  },
+  "services": [
+    {
+      "type": "manager",
+      "tag": "manager",
+      "inbounds": [
+        "tun-in",
+        "local-proxy"
+      ],
+      "database": {
+        "driver": "sqlite",
+        "dsn": "manager.db"
+      }
+    },
+    {
+      "type": "manager-api",
+      "tag": "manager-api",
+      "api_type": "server",
+      "protocol_type": "http",
+      "listen": "::",
+      "listen_port": 9090,
+      "manager": "manager",
+      "api_key": "change-me-to-a-long-random-string"
+    },
+    {
+      "type": "admin-panel",
+      "tag": "admin-panel",
+      "listen": "::",
+      "listen_port": 9091
+    }
+  ]
+}
