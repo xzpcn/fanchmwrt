@@ -26,10 +26,38 @@
     }
   ],
   "route": {
+    "rule_set": [
+      {
+        "type": "local",
+        "tag": "geoip-cn",
+        "format": "binary",
+        "path": "/usr/share/sing-box/geo/geoip-cn.srs"
+      },
+      {
+        "type": "local",
+        "tag": "geosite-cn",
+        "format": "binary",
+        "path": "/usr/share/sing-box/geo/geosite-cn.srs"
+      }
+    ],
     "rules": [
       {
         "action": "hijack-dns",
         "port": 53
+      },
+      {
+        "action": "route",
+        "outbound": "direct",
+        "rule_set": [
+          "geosite-cn"
+        ]
+      },
+      {
+        "action": "route",
+        "outbound": "direct",
+        "rule_set": [
+          "geoip-cn"
+        ]
       }
     ],
     "final": "direct"
