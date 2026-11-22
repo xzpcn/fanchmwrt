@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=sing-box-extended
 PKG_VERSION:=1.14.3-extended-2.7.3
-PKG_RELEASE:=2
+PKG_RELEASE:=3
 
 PKG_SOURCE:=$(PKG_NAME)-$(PKG_VERSION).tar.gz
 PKG_SOURCE_URL:=https://codeload.github.com/shtorm-7/sing-box-extended/tar.gz/refs/tags/v$(PKG_VERSION)?
@@ -159,6 +159,24 @@ endif
 SING_BOX_EXTENDED_MANAGER:=$(if $(SING_BOX_EXTENDED_MIPS),,$(CONFIG_SING_BOX_EXTENDED_MANAGER))
 SING_BOX_EXTENDED_PANEL:=$(if $(SING_BOX_EXTENDED_MIPS),,$(CONFIG_SING_BOX_EXTENDED_ADMIN_PANEL))
 
+# 管理面板要用主机上的 npm 现场编（//go:embed dist，源码树里没有 dist）。
+# Build/Prepare 的 PATH 会被 include/package.mk 换成 TARGET_PATH_PKG，所以
+# npm 路径在解析阶段就取好。
+NPM:=$(shell command -v npm 2>/dev/null)
+
+# 没有 npm 就自动把面板关掉，而不是让整个包崩掉：
+# CONFIG_ALL=y 的通用 CI（openwrt/actions-shared-workflows 的
+# "Build all core packages"）里 ADMIN_PANEL 走默认值，而它的 toolchain
+# 容器里没有 node/npm。面板只是塞进 /usr/bin/sing-box 的静态资源，
+# 关掉不影响任何协议功能；要面板的机器装好 Node.js >= 20 + npm 重新
+# 编译即可（Kconfig 里 ADMIN_PANEL 默认仍是 y）。
+ifeq ($(SING_BOX_EXTENDED_PANEL),y)
+  ifeq ($(NPM),)
+    $(warning sing-box-extended: 找不到 npm，自动关闭 with_admin_panel（管理面板不编入）)
+    SING_BOX_EXTENDED_PANEL:=
+  endif
+endif
+
 # 扩展分支独有的协议始终启用；关闭它们就换用官方 sing-box 了
 SING_BOX_EXTENDED_TAGS:= \
 	with_dhcp \
@@ -201,11 +219,9 @@ GEO_BASE:=https://raw.githubusercontent.com/SagerNet
 # "dist" 规则排除；//go:embed dist 在没有该目录时编译失败，所以本地用
 # vite 生成一次。admin_panel_pack 只产出 *.gz 并清理 *.woff，缺省时
 # service.go 会回退到原始文件，故跳过。
-# Build/Prepare 的 PATH 会被 include/package.mk 换成 TARGET_PATH_PKG，
-# 所以 npm 路径在解析阶段就取好。
-NPM:=$(shell command -v npm 2>/dev/null)
 
-# 有 manager 的架构才装带 services 的配置
+# 有 manager 的架构才装带 manager/manager-api 服务的配置；
+# 面板另有一份 config.admin-panel.example.json，只在面板真的编进去时安装。
 SING_BOX_EXTENDED_CONFIG_JSON:=$(if $(SING_BOX_EXTENDED_MANAGER),./files/config.manager.json,./files/config.json)
 
 define Build/Prepare
@@ -229,10 +245,6 @@ ifneq ($(CONFIG_SING_BOX_EXTENDED_GEORULES),)
 	done
 endif
 ifneq ($(SING_BOX_EXTENDED_PANEL),)
-	[ -n "$(NPM)" ] || { \
-		echo "sing-box-extended: with_admin_panel 需要主机安装 Node.js >= 20 和 npm" >&2; \
-		exit 1; \
-	}
 	cd $(PKG_BUILD_DIR)/service/admin_panel/web && \
 		"$(NPM)" install --no-audit --no-fund && \
 		"$(NPM)" run build
@@ -251,6 +263,9 @@ define Package/sing-box-extended/install
 	$(INSTALL_DIR) $(1)/etc/sing-box
 	$(INSTALL_DATA) $(SING_BOX_EXTENDED_CONFIG_JSON) $(1)/etc/sing-box/config.json
 	$(INSTALL_DATA) ./files/config.tun.example.json $(1)/etc/sing-box/config.tun.example.json
+ifneq ($(SING_BOX_EXTENDED_PANEL),)
+	$(INSTALL_DATA) ./files/config.admin-panel.example.json $(1)/etc/sing-box/config.admin-panel.example.json
+endif
 
 	$(INSTALL_DIR) $(1)/etc/config
 	$(INSTALL_CONF) ./files/sing-box.conf $(1)/etc/config/sing-box

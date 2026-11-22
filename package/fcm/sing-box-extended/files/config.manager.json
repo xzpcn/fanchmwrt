@@ -89,12 +89,6 @@
       "listen_port": 9090,
       "manager": "manager",
       "api_key": "change-me-to-a-long-random-string"
-    },
-    {
-      "type": "admin-panel",
-      "tag": "admin-panel",
-      "listen": "::",
-      "listen_port": 9091
     }
   ]
 }
