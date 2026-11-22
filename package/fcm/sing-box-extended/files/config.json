@@ -67,34 +67,5 @@
       "enabled": true,
       "path": "cache.db"
     }
-  },
-  "services": [
-    {
-      "type": "manager",
-      "tag": "manager",
-      "inbounds": [
-        "local-proxy"
-      ],
-      "database": {
-        "driver": "sqlite",
-        "dsn": "manager.db"
-      }
-    },
-    {
-      "type": "manager-api",
-      "tag": "manager-api",
-      "api_type": "server",
-      "protocol_type": "http",
-      "listen": "::",
-      "listen_port": 9090,
-      "manager": "manager",
-      "api_key": "change-me-to-a-long-random-string"
-    },
-    {
-      "type": "admin-panel",
-      "tag": "admin-panel",
-      "listen": "::",
-      "listen_port": 9091
-    }
-  ]
+  }
 }

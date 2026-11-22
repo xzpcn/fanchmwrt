@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=sing-box-extended
 PKG_VERSION:=1.14.3-extended-2.7.3
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 
 PKG_SOURCE:=$(PKG_NAME)-$(PKG_VERSION).tar.gz
 PKG_SOURCE_URL:=https://codeload.github.com/shtorm-7/sing-box-extended/tar.gz/refs/tags/v$(PKG_VERSION)?
@@ -32,6 +32,7 @@ define Package/sing-box-extended
   TITLE:=The universal proxy platform (extended)
   URL:=https://github.com/shtorm-7/sing-box-extended
   DEPENDS:=$(GO_ARCH_DEPENDS) +ca-bundle +kmod-inet-diag +kmod-tun +kmod-nft-queue
+  CONFLICTS:=sing-box
   USERID:=sing-box=5566:sing-box=5566
 endef
 
@@ -130,6 +131,34 @@ PKG_CONFIG_DEPENDS:= \
 	CONFIG_SING_BOX_EXTENDED_GRPC \
 	CONFIG_SING_BOX_EXTENDED_V2RAY_API
 
+# ---------------------------------------------------------------------------
+# with_manager 在 mips 上编译不过，原因不是本包写错，而是它的存储层
+# modernc.org/sqlite （纯 Go sqlite）根本没有 32 位 mips 的实现：
+#
+#   modernc.org/sqlite/lib 只有 sqlite_linux_{386,amd64,arm,arm64,
+#   loong64,ppc64le,riscv64,s390x}.go 和 darwin/freebsd/netbsd/openbsd/
+#   windows 的文件；依赖的 modernc.org/libc 也只有 mips64le。
+#   GOARCH=mipsle（mt7621 即 mipsel）时这些包没有可编译的源文件，
+#   go build 会直接报 build constraints exclude all Go files in
+#   .../modernc.org/libc，或者 undefined: sqlite3.X... 之类的错。
+#
+# 上游 .goreleaser.yaml 也是这么处理的：main 构建带 with_manager，而
+# id: mips / id: openwrt-mips 两份 tag 列表里没有 with_manager、
+# with_admin_panel。这里跟随同样的做法：mips/mips64 上自动关掉这两项，
+# 其他架构（x86_64、aarch64、armv7、riscv64…）照旧可用。
+# ---------------------------------------------------------------------------
+SING_BOX_EXTENDED_MIPS:=$(strip $(filter mips% mips64%,$(ARCH)))
+
+ifneq ($(SING_BOX_EXTENDED_MIPS),)
+  ifneq ($(filter y,$(CONFIG_SING_BOX_EXTENDED_MANAGER) $(CONFIG_SING_BOX_EXTENDED_ADMIN_PANEL)),)
+    $(warning sing-box-extended: ARCH=$(ARCH) 上 modernc.org/sqlite 无实现，已自动关闭 with_manager / with_admin_panel)
+  endif
+endif
+
+# 解析后的开关：mips 上一律为空
+SING_BOX_EXTENDED_MANAGER:=$(if $(SING_BOX_EXTENDED_MIPS),,$(CONFIG_SING_BOX_EXTENDED_MANAGER))
+SING_BOX_EXTENDED_PANEL:=$(if $(SING_BOX_EXTENDED_MIPS),,$(CONFIG_SING_BOX_EXTENDED_ADMIN_PANEL))
+
 # 扩展分支独有的协议始终启用；关闭它们就换用官方 sing-box 了
 SING_BOX_EXTENDED_TAGS:= \
 	with_dhcp \
@@ -139,8 +168,6 @@ SING_BOX_EXTENDED_TAGS:= \
 	with_sudoku \
 	with_ccm \
 	with_ocm \
-	$(if $(CONFIG_SING_BOX_EXTENDED_MANAGER),with_manager) \
-	$(if $(CONFIG_SING_BOX_EXTENDED_ADMIN_PANEL),with_admin_panel) \
 	$(if $(CONFIG_SING_BOX_EXTENDED_CLASH_API),with_clash_api) \
 	$(if $(CONFIG_SING_BOX_EXTENDED_GVISOR),with_gvisor) \
 	$(if $(CONFIG_SING_BOX_EXTENDED_QUIC),with_quic with_masque) \
@@ -153,6 +180,8 @@ SING_BOX_EXTENDED_TAGS:= \
 	$(if $(CONFIG_SING_BOX_EXTENDED_CLOUDFLARED),with_cloudflared) \
 	$(if $(CONFIG_SING_BOX_EXTENDED_GRPC),with_grpc) \
 	$(if $(CONFIG_SING_BOX_EXTENDED_V2RAY_API),with_v2ray_api) \
+	$(if $(SING_BOX_EXTENDED_MANAGER),with_manager) \
+	$(if $(SING_BOX_EXTENDED_PANEL),with_admin_panel) \
 	badlinkname \
 	tfogo_checklinkname0
 
@@ -176,8 +205,13 @@ GEO_BASE:=https://raw.githubusercontent.com/SagerNet
 # 所以 npm 路径在解析阶段就取好。
 NPM:=$(shell command -v npm 2>/dev/null)
 
+# 有 manager 的架构才装带 services 的配置
+SING_BOX_EXTENDED_CONFIG_JSON:=$(if $(SING_BOX_EXTENDED_MANAGER),./files/config.manager.json,./files/config.json)
+
 define Build/Prepare
 	$(call Build/Prepare/Default)
+	@echo "sing-box-extended: ARCH=$(ARCH) MANAGER=$(if $(SING_BOX_EXTENDED_MANAGER),on,off) ADMIN_PANEL=$(if $(SING_BOX_EXTENDED_PANEL),on,off)"
+	@echo "sing-box-extended: GO_PKG_TAGS=$(GO_PKG_TAGS)"
 ifneq ($(CONFIG_SING_BOX_EXTENDED_GEORULES),)
 	mkdir -p $(GEO_DL_DIR)
 	for f in $(GEO_RULES); do \
@@ -194,7 +228,7 @@ ifneq ($(CONFIG_SING_BOX_EXTENDED_GEORULES),)
 			exit 1; }; \
 	done
 endif
-ifneq ($(CONFIG_SING_BOX_EXTENDED_ADMIN_PANEL),)
+ifneq ($(SING_BOX_EXTENDED_PANEL),)
 	[ -n "$(NPM)" ] || { \
 		echo "sing-box-extended: with_admin_panel 需要主机安装 Node.js >= 20 和 npm" >&2; \
 		exit 1; \
@@ -215,7 +249,7 @@ define Package/sing-box-extended/install
 	$(INSTALL_BIN) $(GO_PKG_BUILD_BIN_DIR)/sing-box $(1)/usr/bin/sing-box
 
 	$(INSTALL_DIR) $(1)/etc/sing-box
-	$(INSTALL_DATA) ./files/config.json $(1)/etc/sing-box/config.json
+	$(INSTALL_DATA) $(SING_BOX_EXTENDED_CONFIG_JSON) $(1)/etc/sing-box/config.json
 	$(INSTALL_DATA) ./files/config.tun.example.json $(1)/etc/sing-box/config.tun.example.json
 
 	$(INSTALL_DIR) $(1)/etc/config
@@ -235,3 +269,10 @@ endif
 endef
 
 $(eval $(call BuildPackage,sing-box-extended))
+
+# CI/排错用：make -C package/fcm/sing-box-extended TOPDIR=$PWD show-tags
+show-tags:
+	@echo "ARCH=$(ARCH)"
+	@echo "MANAGER=$(if $(SING_BOX_EXTENDED_MANAGER),on,off)"
+	@echo "ADMIN_PANEL=$(if $(SING_BOX_EXTENDED_PANEL),on,off)"
+	@echo "GO_PKG_TAGS=$(GO_PKG_TAGS)"
