@@ -1,12 +1,30 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=sing-box-extended
-PKG_VERSION:=1.14.3-extended-2.7.3
-PKG_RELEASE:=4
+PKG_VERSION:=1.14.3
+PKG_RELEASE:=5
 
-PKG_SOURCE:=$(PKG_NAME)-$(PKG_VERSION).tar.gz
-PKG_SOURCE_URL:=https://codeload.github.com/shtorm-7/sing-box-extended/tar.gz/refs/tags/v$(PKG_VERSION)?
+# 上游 tag 是 v1.14.3-extended-2.7.3，但 "-extended-2.7.3" 不能进 PKG_VERSION：
+# OpenWrt 25.12 的包管理器是 apk，它的版本语法是
+#   digit{.digit}...{letter}{_suf{#}}...{~hash}{-r#}
+# 也就是 "-" 只允许出现在 "-r<数字>" 里，其余段只能是数字/字母/下划线。
+# 直接把 1.14.3-extended-2.7.3 当版本会死在打包那一步：
+#   ERROR: info field 'version' has invalid value: package version is invalid
+#   ERROR: failed to create package: package version is invalid
+# （opkg/ipk 时代不校验，apk 会卡死。）所以：
+#   - 包版本用 1.14.3-r$(PKG_RELEASE)
+#   - 完整 tag 放在 PKG_EXTENDED_SUFFIX，只用于源码 URL 和二进制里的
+#     constant.Version（sing-box version 仍显示 1.14.3-extended-2.7.3）
+PKG_EXTENDED_SUFFIX:=extended-2.7.3
+
+PKG_SOURCE:=$(PKG_NAME)-$(PKG_VERSION)-$(PKG_EXTENDED_SUFFIX).tar.gz
+PKG_SOURCE_URL:=https://codeload.github.com/shtorm-7/sing-box-extended/tar.gz/refs/tags/v$(PKG_VERSION)-$(PKG_EXTENDED_SUFFIX)?
 PKG_HASH:=9b9b4015b7ed9ff632a97b1ed5d024de8828e4d8e8afbebae6a10780bc555511
+
+# 源码包里的顶层目录就叫 sing-box-extended-1.14.3-extended-2.7.3；
+# include/unpack.mk 是解到 $(PKG_BUILD_DIR)/.. 的，靠同名合并，
+# 所以 PKG_BUILD_DIR 必须跟 tarball 顶层目录一致，否则源码会落进多余的子目录。
+PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)-$(PKG_VERSION)-$(PKG_EXTENDED_SUFFIX)
 
 PKG_LICENSE:=GPL-3.0-or-later
 PKG_LICENSE_FILES:=LICENSE
@@ -19,7 +37,7 @@ PKG_BUILD_FLAGS:=no-mips16
 GO_PKG:=github.com/sagernet/sing-box
 GO_PKG_BUILD_PKG:=$(GO_PKG)/cmd/sing-box
 GO_PKG_LDFLAGS:=-checklinkname=0 -X runtime.godebugDefault=multipathtcp=0,tlssha1=1
-GO_PKG_LDFLAGS_X:=$(GO_PKG)/constant.Version=$(PKG_VERSION)
+GO_PKG_LDFLAGS_X:=$(GO_PKG)/constant.Version=$(PKG_VERSION)-$(PKG_EXTENDED_SUFFIX)
 
 include $(INCLUDE_DIR)/package.mk
 # 由 ./scripts/feeds update packages 提供，必须在 make 之前执行
