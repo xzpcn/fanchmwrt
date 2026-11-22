@@ -154,7 +154,9 @@ jobs:
           # （文件名由 include/subdir.mk 决定，这里用 find 匹配，不猜命名）。
           echo "===== 按包日志（logs/）====="
           if [ -d logs ]; then
-            find logs -type f -name '*sing-box-extended*' | sort | while read -r f; do
+            # include/subdir.mk 的日志路径是 logs/<subdir>/<target>.txt，
+            # 所以按“路径”匹配（-path），不是按文件名（-name）。
+            find logs -type f -path '*sing-box-extended*' | sort | while read -r f; do
               echo "===== $f ====="
               tail -n 300 "$f"
             done
