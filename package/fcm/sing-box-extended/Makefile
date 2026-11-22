@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=sing-box-extended
 PKG_VERSION:=1.14.3-extended-2.7.3
-PKG_RELEASE:=3
+PKG_RELEASE:=4
 
 PKG_SOURCE:=$(PKG_NAME)-$(PKG_VERSION).tar.gz
 PKG_SOURCE_URL:=https://codeload.github.com/shtorm-7/sing-box-extended/tar.gz/refs/tags/v$(PKG_VERSION)?
@@ -56,13 +56,13 @@ define Package/sing-box-extended/config
 		default y
 
 	config SING_BOX_EXTENDED_GEORULES
-		bool "Download and install CN rule sets (.srs) into the package"
+		bool "Install CN rule sets (.srs) into the package"
 		default y
 		help
 		  sing-box 1.12 起已删除 geoip.db/geosite.db，分流改用 .srs 规则集。
-		  客户端常规是开机从 GitHub 拉这些文件，国内网络拉不动，所以要在
-		  构建阶段就取好装进 /usr/share/sing-box/geo/。下载结果缓存在源码树
-		  的 dl/sing-box-geo 里，重复构建不联网；想要新规则时删掉该目录。
+		  客户端常规是开机从 GitHub 拉这些文件，国内网络拉不动就没分流，
+		  所以规则随包装在 files/geo/ 下，安装到 /usr/share/sing-box/geo/。
+		  构建阶段不联网；更新规则见 Makefile 里 GEO_FILES 上方的说明。
 
 	config SING_BOX_EXTENDED_CLASH_API
 		bool "Build Clash API support"
@@ -205,20 +205,41 @@ SING_BOX_EXTENDED_TAGS:= \
 
 GO_PKG_TAGS:=$(subst $(space),$(comma),$(strip $(SING_BOX_EXTENDED_TAGS)))
 
-# 分流规则集。sing-box 1.12 起 geoip.db/geosite.db 被彻底删除（见
-# route/rule/rule_default.go 报的 "removed in sing-box 1.12.0"），只剩 .srs。
-# 客户端常规做法是开机从 GitHub 拉规则，国内拉不到就直接没有分流，所以在构建
-# 阶段拉好、打进固件（geoip-cn 34KB + geosite-cn 58KB，共约 92KB）。
-# rule-set 分支是滚动更新的，故意不校验 hash；下载结果缓存在 dl/sing-box-geo，
-# 重建时想换新规则就删掉那个目录。要加集合往 GEO_RULES 里追加即可。
-GEO_RULES:=geoip-cn.srs geosite-cn.srs
-GEO_DL_DIR:=$(DL_DIR)/sing-box-geo
-GEO_BASE:=https://raw.githubusercontent.com/SagerNet
+# 分流规则集：sing-box 1.12 起 geoip.db/geosite.db 被彻底删除（route/rule 里会
+# 报 "removed in sing-box 1.12.0"），只剩 .srs。客户端常规做法是开机从 GitHub
+# 拉规则，国内拉不到就等于没有分流，所以构建阶段就把规则装进
+# /usr/share/sing-box/geo/。
+#
+# 规则文件直接入库在 files/geo/ 下（geoip-cn 34KB + geosite-cn 58KB）：
+# 构建不联网、不依赖 dl/ 里的临时文件，install 用显式文件名拷贝，缺文件当场
+# 报错，不会出现「规则没装上但构建成功」或者「install 阶段找不到 *.srs」。
+# 更新规则（rule-set 分支是滚动更新的）：
+#   curl -sSfL -o files/geo/geoip-cn.srs \
+#     https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs
+#   curl -sSfL -o files/geo/geosite-cn.srs \
+#     https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs
+# 然后 PKG_RELEASE 加一。
+GEO_FILES:=geoip-cn.srs geosite-cn.srs
 
-# 上游 README 声称 service/admin_panel/dist 已入库，实际被 .gitignore 的
-# "dist" 规则排除；//go:embed dist 在没有该目录时编译失败，所以本地用
-# vite 生成一次。admin_panel_pack 只产出 *.gz 并清理 *.woff，缺省时
-# service.go 会回退到原始文件，故跳过。
+ifeq ($(CONFIG_SING_BOX_EXTENDED_GEORULES),y)
+define Install/GeoRules
+	$(INSTALL_DIR) $(1)/usr/share/sing-box/geo
+	$(INSTALL_DATA) ./files/geo/geoip-cn.srs $(1)/usr/share/sing-box/geo/geoip-cn.srs
+	$(INSTALL_DATA) ./files/geo/geosite-cn.srs $(1)/usr/share/sing-box/geo/geosite-cn.srs
+endef
+endif
+
+ifeq ($(SING_BOX_EXTENDED_PANEL),y)
+define Install/AdminPanelExample
+	$(INSTALL_DATA) ./files/config.admin-panel.example.json $(1)/etc/sing-box/config.admin-panel.example.json
+endef
+
+define Build/AdminPanel
+	cd $(PKG_BUILD_DIR)/service/admin_panel/web && \
+		"$(NPM)" install --no-audit --no-fund && \
+		"$(NPM)" run build
+endef
+endif
 
 # 有 manager 的架构才装带 manager/manager-api 服务的配置；
 # 面板另有一份 config.admin-panel.example.json，只在面板真的编进去时安装。
@@ -228,27 +249,8 @@ define Build/Prepare
 	$(call Build/Prepare/Default)
 	@echo "sing-box-extended: ARCH=$(ARCH) MANAGER=$(if $(SING_BOX_EXTENDED_MANAGER),on,off) ADMIN_PANEL=$(if $(SING_BOX_EXTENDED_PANEL),on,off)"
 	@echo "sing-box-extended: GO_PKG_TAGS=$(GO_PKG_TAGS)"
-ifneq ($(CONFIG_SING_BOX_EXTENDED_GEORULES),)
-	mkdir -p $(GEO_DL_DIR)
-	for f in $(GEO_RULES); do \
-		case "$$f" in geoip-*) r=sing-geoip;; *) r=sing-geosite;; esac; \
-		u="$(GEO_BASE)/$$r/rule-set/$$f"; \
-		[ -s "$(GEO_DL_DIR)/$$f" ] && continue; \
-		echo "sing-box-extended: 拉取分流规则 $$u"; \
-		if command -v curl >/dev/null 2>&1; then \
-			curl -sSfL --connect-timeout 20 --retry 3 -o "$(GEO_DL_DIR)/$$f" "$$u"; \
-		else \
-			wget -q -T 20 -t 3 -O "$(GEO_DL_DIR)/$$f" "$$u"; \
-		fi || { rm -f "$(GEO_DL_DIR)/$$f"; \
-			echo "sing-box-extended: 下载 $$f 失败。可在能上网的机器上把它放进 $(GEO_DL_DIR)/，或关掉 CONFIG_SING_BOX_EXTENDED_GEORULES 并删掉 config.json 里的 rule_set 两条。" >&2; \
-			exit 1; }; \
-	done
-endif
-ifneq ($(SING_BOX_EXTENDED_PANEL),)
-	cd $(PKG_BUILD_DIR)/service/admin_panel/web && \
-		"$(NPM)" install --no-audit --no-fund && \
-		"$(NPM)" run build
-endif
+	@ls -l ./files/geo 2>/dev/null || true
+	$(Build/AdminPanel)
 endef
 
 define Package/sing-box-extended/conffiles
@@ -263,9 +265,7 @@ define Package/sing-box-extended/install
 	$(INSTALL_DIR) $(1)/etc/sing-box
 	$(INSTALL_DATA) $(SING_BOX_EXTENDED_CONFIG_JSON) $(1)/etc/sing-box/config.json
 	$(INSTALL_DATA) ./files/config.tun.example.json $(1)/etc/sing-box/config.tun.example.json
-ifneq ($(SING_BOX_EXTENDED_PANEL),)
-	$(INSTALL_DATA) ./files/config.admin-panel.example.json $(1)/etc/sing-box/config.admin-panel.example.json
-endif
+	$(call Install/AdminPanelExample,$(1))
 
 	$(INSTALL_DIR) $(1)/etc/config
 	$(INSTALL_CONF) ./files/sing-box.conf $(1)/etc/config/sing-box
@@ -277,10 +277,7 @@ endif
 	$(INSTALL_DATA) ./files/sing-box.keep $(1)/lib/upgrade/keep.d/sing-box
 
 	$(INSTALL_DIR) $(1)/usr/share/sing-box
-ifneq ($(CONFIG_SING_BOX_EXTENDED_GEORULES),)
-	$(INSTALL_DIR) $(1)/usr/share/sing-box/geo
-	$(INSTALL_DATA) $(GEO_DL_DIR)/*.srs $(1)/usr/share/sing-box/geo/
-endif
+	$(call Install/GeoRules,$(1))
 endef
 
 $(eval $(call BuildPackage,sing-box-extended))
@@ -290,4 +287,6 @@ show-tags:
 	@echo "ARCH=$(ARCH)"
 	@echo "MANAGER=$(if $(SING_BOX_EXTENDED_MANAGER),on,off)"
 	@echo "ADMIN_PANEL=$(if $(SING_BOX_EXTENDED_PANEL),on,off)"
+	@echo "GEORULES=$(if $(CONFIG_SING_BOX_EXTENDED_GEORULES),on,off)"
+	@echo "GEO_FILES=$(GEO_FILES)"
 	@echo "GO_PKG_TAGS=$(GO_PKG_TAGS)"
